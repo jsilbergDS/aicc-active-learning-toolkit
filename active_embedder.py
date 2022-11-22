@@ -31,23 +31,6 @@ class ActiveData(torch.utils.data.Dataset):
     return img
 
 CHECKPOINT_PATH = "simclr"
-# Github URL where saved models are stored for this tutorial
-base_url = "https://raw.githubusercontent.com/phlippe/saved_models/main/tutorial17/"
-# Files to download
-pretrained_files = ["SimCLR.ckpt"]
-
-for file_name in pretrained_files:
-    file_path = os.path.join(CHECKPOINT_PATH, file_name)
-    if "/" in file_name:
-        os.makedirs(file_path.rsplit("/",1)[0], exist_ok=True)
-    if not os.path.isfile(file_path):
-        file_url = base_url + file_name
-        print(f"Downloading {file_url}...")
-        try:
-            urllib.request.urlretrieve(file_url, file_path)
-        except HTTPError as e:
-            print("Something went wrong. Please try to download the file from the GDrive folder, or contact the author with the full output including the following error:\n", e)
-
 
 os.makedirs(CHECKPOINT_PATH, exist_ok=True)
 pl.seed_everything(42)
@@ -80,7 +63,7 @@ def data_splitter(image_list,image_size,transform):
 
 class SimCLR(pl.LightningModule):
 
-    def __init__(self, hidden_dim, lr, temperature, weight_decay, max_epochs=500):
+    def __init__(self, hidden_dim, lr, temperature, weight_decay, max_epochs=2):
         super().__init__()
         self.save_hyperparameters()
         assert self.hparams.temperature > 0.0, 'The temperature must be a positive float!'
@@ -143,12 +126,12 @@ class SimCLR(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         self.info_nce_loss(batch, mode='val')
 
-def train_simclr(train_loader,val_loader,max_epochs=500, **kwargs):
+def train_simclr(train_loader,val_loader,max_epochs=500, accelerator=None,**kwargs):
     trainer = pl.Trainer(default_root_dir=os.path.join(CHECKPOINT_PATH, 'SimCLR'),
-                         accelerator="gpu",
+                         #Global seed set to 42accelerator="gpu",
                          devices=1,
                          max_epochs=max_epochs,
-                         callbacks=[ModelCheckpoint(save_weights_only=True, mode='max', monitor='val_acc_top5'),
+                         callbacks=[ModelCheckpoint(dirpath="simclr", mode='max', monitor='val_acc_top5'),
                                     LearningRateMonitor('epoch')])
     trainer.logger._default_hp_metric = None # Optional logging argument that we don't need
 
@@ -157,16 +140,20 @@ def train_simclr(train_loader,val_loader,max_epochs=500, **kwargs):
     if os.path.isfile(pretrained_filename):
         print(f'Found pretrained model at {pretrained_filename}, loading...')
         model = SimCLR.load_from_checkpoint(pretrained_filename) # Automatically loads the model with the saved hyperparameters
-        trainer.fit(model, train_loader, val_loader)
+        if accelerator!=None:
+          trainer.fit(model, accelerator=accelerator,train_loader, val_loader)
+        else: 
+          trainer.fit(model, train_loader, val_loader)
         model = SimCLR.load_from_checkpoint(trainer.checkpoint_callback.best_model_path) # Load best checkpoint after training
 
     return model
 
 class Embedder():
 
-  def __init__(self, image_list, image_size, embedding_option = -1,embeddings_loc=None,transform=None):
+  def __init__(self, image_list, image_size, embedding_option = -1,embeddings_loc=None,transform=None,embedding_ckpt=None):
     self.image_list = image_list
     self.image_size = image_size
+    self.embedding_ckpt=embedding_ckpt
     if embedding_option==-1 and embeddings_loc==None:
       print("You need to select an option to create embeddings")
       raise NotImplementedError
@@ -179,7 +166,7 @@ class Embedder():
 
   def load_embedder(self,embedding_option):
     if embedding_option==1:
-      model = vgg16(weights=torchvision.models.VGG16_Weights.IMAGENET1K_V1)
+      model = torchvision.models.vgg16(weights=torchvision.models.VGG16_Weights.IMAGENET1K_V1)
       self.model = model
       self.model.classifier = torch.nn.Sequential(*list(model.classifier.children())[:-3])
       pipeline = torchvision.models.VGG16_Weights.IMAGENET1K_V1.transforms()
@@ -189,7 +176,7 @@ class Embedder():
                             lr=5e-4,
                             temperature=0.07,
                             weight_decay=1e-4)
-      model.load_from_checkpoint('/deep/u/jsilberg/aicc-aut22-active_learning/ALT/simclr/SimCLR.ckpt')
+      model.load_from_checkpoint('simclr/SimCLR.ckpt')
       self.model = model
       self.pipeline = self.transform
     if embedding_option==3:
@@ -199,8 +186,16 @@ class Embedder():
                             lr=5e-4,
                             temperature=0.07,
                             weight_decay=1e-4,
-                            max_epochs=500)
+                            max_epochs=1)
       self.model = simclr_model
+      self.pipeline = self.transform
+    if embedding_option==4: 
+      model = SimCLR(hidden_dim=128,
+                            lr=5e-4,
+                            temperature=0.07,
+                            weight_decay=1e-4)
+      model.load_from_checkpoint(self.embedding_ckpt)
+      self.model = model
       self.pipeline = self.transform
  
   def get_embeddings(self,transform):
@@ -209,6 +204,7 @@ class Embedder():
     feature_tens = None
     for i, image in enumerate(self.active_loader):
       features = self.model(image)
+      print(i)
       if feature_tens==None:
         feature_tens=features
       else:
